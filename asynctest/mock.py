@@ -16,6 +16,7 @@ import contextlib
 import enum
 import functools
 import inspect
+import pkgutil
 import sys
 import types
 import unittest.mock
@@ -430,8 +431,7 @@ class _AwaitEvent:
         self._mock = mock
         self._condition = None
 
-    @asyncio.coroutine
-    def wait(self, skip=0):
+    async def wait(self, skip=0):
         """
         Wait for await.
 
@@ -442,10 +442,9 @@ class _AwaitEvent:
         def predicate(mock):
             return mock.await_count > skip
 
-        return (yield from self.wait_for(predicate))
+        return await self.wait_for(predicate)
 
-    @asyncio.coroutine
-    def wait_next(self, skip=0):
+    async def wait_next(self, skip=0):
         """
         Wait for the next await.
 
@@ -462,10 +461,9 @@ class _AwaitEvent:
         def predicate(mock):
             return mock.await_count > await_count + skip
 
-        return (yield from self.wait_for(predicate))
+        return await self.wait_for(predicate)
 
-    @asyncio.coroutine
-    def wait_for(self, predicate):
+    async def wait_for(self, predicate):
         """
         Wait for a given predicate to become True.
 
@@ -476,21 +474,20 @@ class _AwaitEvent:
         condition = self._get_condition()
 
         try:
-            yield from condition.acquire()
+            await condition.acquire()
 
             def _predicate():
                 return predicate(self._mock)
 
-            return (yield from condition.wait_for(_predicate))
+            return await condition.wait_for(_predicate)
         finally:
             condition.release()
 
-    @asyncio.coroutine
-    def _notify(self):
+    async def _notify(self):
         condition = self._get_condition()
 
         try:
-            yield from condition.acquire()
+            await condition.acquire()
             condition.notify_all()
         finally:
             condition.release()
@@ -595,18 +592,17 @@ class CoroutineMock(Mock):
 
         _call = _mock_self.call_args
 
-        @asyncio.coroutine
-        def proxy():
+        async def proxy():
             try:
                 if inspect.isawaitable(result):
-                    return (yield from result)
+                    return await result
                 else:
                     return result
             finally:
                 _mock_self.await_count += 1
                 _mock_self.await_args = _call
                 _mock_self.await_args_list.append(_call)
-                yield from _mock_self.awaited._notify()
+                await _mock_self.awaited._notify()
 
         return proxy()
 
@@ -1268,98 +1264,150 @@ def _patch_multiple(target, spec=None, create=False, spec_set=None,
 
     return patcher
 
+class _patch_dict(object):
+    """
+    Patch a dictionary, or dictionary like object, and restore the dictionary
+    to its original state after the test.
+    `in_dict` can be a dictionary or a mapping like container. If it is a
+    mapping then it must at least support getting, setting and deleting items
+    plus iterating over keys.
+    `in_dict` can also be a string specifying the name of the dictionary, which
+    will then be fetched by importing it.
+    `values` can be a dictionary of values to set in the dictionary. `values`
+    can also be an iterable of `(key, value)` pairs.
+    If `clear` is True then the dictionary will be cleared before the new
+    values are set.
+    `patch.dict` can also be called with arbitrary keyword arguments to set
+    values in the dictionary::
+        with patch.dict('sys.modules', mymodule=Mock(), other_module=Mock()):
+            ...
+    `patch.dict` can be used as a context manager, decorator or class
+    decorator. When used as a class decorator `patch.dict` honours
+    `patch.TEST_PREFIX` for choosing which methods to wrap.
+    """
 
-class _patch_dict(unittest.mock._patch_dict):
-    # documentation is in doc/asynctest.mock.rst
-    def __init__(self, in_dict, values=(), clear=False, scope=GLOBAL,
-                 **kwargs):
-        super().__init__(in_dict, values, clear, **kwargs)
-        self.scope = scope
-        self._is_started = False
-        self._global_patchings = []
+    def __init__(self, in_dict, values=(), clear=False, **kwargs):
+        self.in_dict = in_dict
+        # support any argument supported by dict(...) constructor
+        self.values = dict(values)
+        self.values.update(kwargs)
+        self.clear = clear
+        self._original = None
 
-    def copy(self):
-        patcher = _patch_dict(self.in_dict, self.values, self.clear,
-                              self.scope)
-        patcher._global_patchings = [p.copy() for p in self._global_patchings]
-        return patcher
 
-    def _keep_global_patch(self, other_patching):
-        self._global_patchings.append(other_patching)
+    def __call__(self, f):
+        if isinstance(f, type):
+            return self.decorate_class(f)
+        if inspect.iscoroutinefunction(f):
+            return self.decorate_async_callable(f)
+        return self.decorate_callable(f)
+
+
+    def decorate_callable(self, f):
+        @functools.wraps(f)
+        def _inner(*args, **kw):
+            self._patch_dict()
+            try:
+                return f(*args, **kw)
+            finally:
+                self._unpatch_dict()
+
+        return _inner
+
+
+    def decorate_async_callable(self, f):
+        @functools.wraps(f)
+        async def _inner(*args, **kw):
+            self._patch_dict()
+            try:
+                return await f(*args, **kw)
+            finally:
+                self._unpatch_dict()
+
+        return _inner
+
 
     def decorate_class(self, klass):
         for attr in dir(klass):
             attr_value = getattr(klass, attr)
             if (attr.startswith(patch.TEST_PREFIX) and
-                    hasattr(attr_value, "__call__")):
+                 hasattr(attr_value, "__call__")):
                 decorator = _patch_dict(self.in_dict, self.values, self.clear)
                 decorated = decorator(attr_value)
                 setattr(klass, attr, decorated)
         return klass
 
-    def __call__(self, func):
-        if isinstance(func, type):
-            return self.decorate_class(func)
 
-        wrapper = _decorate_coroutine_callable(func, self)
-        if wrapper is None:
-            return super().__call__(func)
-        else:
-            return wrapper
+    def __enter__(self):
+        """Patch the dict."""
+        self._patch_dict()
+        return self.in_dict
+
 
     def _patch_dict(self):
-        self._is_started = True
-
-        # Since Python 3.7.3, the moment when a dict specified by a target
-        # string has been corrected. (see #115)
+        values = self.values
         if isinstance(self.in_dict, str):
-            self.in_dict = unittest.mock._importer(self.in_dict)
+            self.in_dict = pkgutil.resolve_name(self.in_dict)
+        in_dict = self.in_dict
+        clear = self.clear
 
         try:
-            self._original = self.in_dict.copy()
+            original = in_dict.copy()
         except AttributeError:
             # dict like object with no copy method
             # must support iteration over keys
-            self._original = {}
-            for key in self.in_dict:
-                self._original[key] = self.in_dict[key]
+            original = {}
+            for key in in_dict:
+                original[key] = in_dict[key]
+        self._original = original
 
-        if self.clear:
-            _clear_dict(self.in_dict)
+        if clear:
+            _clear_dict(in_dict)
 
         try:
-            self.in_dict.update(self.values)
+            in_dict.update(values)
         except AttributeError:
             # dict like object with no update method
-            for key in self.values:
-                self.in_dict[key] = self.values[key]
+            for key in values:
+                in_dict[key] = values[key]
+
 
     def _unpatch_dict(self):
-        self._is_started = False
+        in_dict = self.in_dict
+        original = self._original
 
-        if self.scope == LIMITED:
-            # add to self.values the updated values which where not in
-            # the original dict, as the patch may be reactivated
-            for key in self.in_dict:
-                if (key not in self._original or
-                        self._original[key] is not self.in_dict[key]):
-                    self.values[key] = self.in_dict[key]
+        _clear_dict(in_dict)
 
-        _clear_dict(self.in_dict)
+        try:
+            in_dict.update(original)
+        except AttributeError:
+            for key in original:
+                in_dict[key] = original[key]
 
-        originals = [self._original]
-        for patching in self._global_patchings:
-            if patching._is_started:
-                # keep the values of global patches
-                originals.append(patching.values)
 
-        for original in originals:
-            try:
-                self.in_dict.update(original)
-            except AttributeError:
-                for key in original:
-                    self.in_dict[key] = original[key]
+    def __exit__(self, *args):
+        """Unpatch the dict."""
+        if self._original is not None:
+            self._unpatch_dict()
+        return False
 
+
+    def start(self):
+        """Activate a patch, returning any created mock."""
+        result = self.__enter__()
+        _patch._active_patches.append(self)
+        return result
+
+
+    def stop(self):
+        """Stop an active patch."""
+        try:
+            _patch._active_patches.remove(self)
+        except ValueError:
+            # If the patch hasn't been started this will fail
+            return None
+
+        return self.__exit__(None, None, None)
 
 _clear_dict = unittest.mock._clear_dict
 
