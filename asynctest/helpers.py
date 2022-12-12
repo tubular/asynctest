@@ -9,7 +9,8 @@ Helper functions and coroutines for :mod:`asynctest`.
 import asyncio
 
 
-async def exhaust_callbacks(loop):
+@asyncio.coroutine
+def exhaust_callbacks(loop):
     """
     Run the loop until all ready callbacks are executed.
 
@@ -20,4 +21,4 @@ async def exhaust_callbacks(loop):
     :param loop: event loop
     """
     while loop._ready:
-        await asyncio.sleep(0)
+        yield from asyncio.sleep(0, loop=loop)

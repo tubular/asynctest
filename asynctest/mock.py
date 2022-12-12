@@ -431,7 +431,8 @@ class _AwaitEvent:
         self._mock = mock
         self._condition = None
 
-    async def wait(self, skip=0):
+    @asyncio.coroutine
+    def wait(self, skip=0):
         """
         Wait for await.
 
@@ -442,9 +443,10 @@ class _AwaitEvent:
         def predicate(mock):
             return mock.await_count > skip
 
-        return await self.wait_for(predicate)
+        return (yield from self.wait_for(predicate))
 
-    async def wait_next(self, skip=0):
+    @asyncio.coroutine
+    def wait_next(self, skip=0):
         """
         Wait for the next await.
 
@@ -461,9 +463,10 @@ class _AwaitEvent:
         def predicate(mock):
             return mock.await_count > await_count + skip
 
-        return await self.wait_for(predicate)
+        return (yield from self.wait_for(predicate))
 
-    async def wait_for(self, predicate):
+    @asyncio.coroutine
+    def wait_for(self, predicate):
         """
         Wait for a given predicate to become True.
 
@@ -474,20 +477,21 @@ class _AwaitEvent:
         condition = self._get_condition()
 
         try:
-            await condition.acquire()
+            yield from condition.acquire()
 
             def _predicate():
                 return predicate(self._mock)
 
-            return await condition.wait_for(_predicate)
+            return (yield from condition.wait_for(_predicate))
         finally:
             condition.release()
 
-    async def _notify(self):
+    @asyncio.coroutine
+    def _notify(self):
         condition = self._get_condition()
 
         try:
-            await condition.acquire()
+            yield from condition.acquire()
             condition.notify_all()
         finally:
             condition.release()
@@ -592,17 +596,18 @@ class CoroutineMock(Mock):
 
         _call = _mock_self.call_args
 
-        async def proxy():
+        @asyncio.coroutine
+        def proxy():
             try:
                 if inspect.isawaitable(result):
-                    return await result
+                    return (yield from result)
                 else:
                     return result
             finally:
                 _mock_self.await_count += 1
                 _mock_self.await_args = _call
                 _mock_self.await_args_list.append(_call)
-                await _mock_self.awaited._notify()
+                yield from _mock_self.awaited._notify()
 
         return proxy()
 

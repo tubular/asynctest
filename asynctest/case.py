@@ -353,7 +353,8 @@ class TestCase(unittest.TestCase):
         if asyncio.iscoroutine(result):
             self.loop.run_until_complete(result)
 
-    async def doCleanups(self):
+    @asyncio.coroutine
+    def doCleanups(self):
         """
         Execute all cleanup functions. Normally called for you after tearDown.
         """
@@ -362,7 +363,7 @@ class TestCase(unittest.TestCase):
             function, args, kwargs = self._cleanups.pop()
             with outcome.testPartExecutor(self):
                 if asyncio.iscoroutinefunction(function):
-                    await function(*args, **kwargs)
+                    yield from function(*args, **kwargs)
                 else:
                     function(*args, **kwargs)
 
@@ -376,7 +377,8 @@ class TestCase(unittest.TestCase):
         """
         return super().addCleanup(function, *args, **kwargs)
 
-    async def assertAsyncRaises(self, exception, awaitable):
+    @asyncio.coroutine
+    def assertAsyncRaises(self, exception, awaitable):
         """
         Test that an exception of type ``exception`` is raised when an
         exception is raised when awaiting ``awaitable``, a future or coroutine.
@@ -389,9 +391,10 @@ class TestCase(unittest.TestCase):
         :see: :meth:`unittest.TestCase.assertRaises()`
         """
         with self.assertRaises(exception):
-            return await awaitable
+            return (yield from awaitable)
 
-    async def assertAsyncRaisesRegex(self, exception, regex, awaitable):
+    @asyncio.coroutine
+    def assertAsyncRaisesRegex(self, exception, regex, awaitable):
         """
         Like :meth:`assertAsyncRaises()` but also tests that ``regex`` matches
         on the string representation of the raised exception.
@@ -399,9 +402,10 @@ class TestCase(unittest.TestCase):
         :see: :meth:`unittest.TestCase.assertRaisesRegex()`
         """
         with self.assertRaisesRegex(exception, regex):
-            return await awaitable
+            return (yield from awaitable)
 
-    async def assertAsyncWarns(self, warning, awaitable):
+    @asyncio.coroutine
+    def assertAsyncWarns(self, warning, awaitable):
         """
         Test that a warning is triggered when awaiting ``awaitable``, a future
         or a coroutine.
@@ -409,9 +413,10 @@ class TestCase(unittest.TestCase):
         :see: :meth:`unittest.TestCase.assertWarns()`
         """
         with self.assertWarns(warning):
-            return await awaitable
+            return (yield from awaitable)
 
-    async def assertAsyncWarnsRegex(self, warning, regex, awaitable):
+    @asyncio.coroutine
+    def assertAsyncWarnsRegex(self, warning, regex, awaitable):
         """
         Like :meth:`assertAsyncWarns()` but also tests that ``regex`` matches
         on the message of the triggered warning.
@@ -419,7 +424,7 @@ class TestCase(unittest.TestCase):
         :see: :meth:`unittest.TestCase.assertWarnsRegex()`
         """
         with self.assertWarnsRegex(warning, regex):
-            return await awaitable
+            return (yield from awaitable)
 
 
 class FunctionTestCase(TestCase, unittest.FunctionTestCase):
@@ -441,7 +446,8 @@ class ClockedTestCase(TestCase):
         self.loop.time = functools.wraps(self.loop.time)(lambda: self._time)
         self._time = 0
 
-    async def advance(self, seconds):
+    @asyncio.coroutine
+    def advance(self, seconds):
         """
         Fast forward time by a number of ``seconds``.
 
@@ -462,7 +468,7 @@ class ClockedTestCase(TestCase):
             raise ValueError(
                 'Cannot go back in time ({} seconds)'.format(seconds))
 
-        await self._drain_loop()
+        yield from self._drain_loop()
 
         target_time = self._time + seconds
         while True:
@@ -471,10 +477,10 @@ class ClockedTestCase(TestCase):
                 break
 
             self._time = next_time
-            await self._drain_loop()
+            yield from self._drain_loop()
 
         self._time = target_time
-        await self._drain_loop()
+        yield from self._drain_loop()
 
     def _next_scheduled(self):
         try:
@@ -482,14 +488,15 @@ class ClockedTestCase(TestCase):
         except IndexError:
             return None
 
-    async def _drain_loop(self):
+    @asyncio.coroutine
+    def _drain_loop(self):
         while True:
             next_time = self._next_scheduled()
             if not self.loop._ready and (next_time is None or
                                          next_time > self._time):
                 break
 
-            await asyncio.sleep(0)
+            yield from asyncio.sleep(0)
             self.loop._TestCase_asynctest_ran = True
 
 
