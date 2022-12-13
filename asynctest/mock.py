@@ -948,14 +948,13 @@ def _decorate_coroutine_callable(func, new_patching):
         # coroutines.
         # If one wants to ensure the same patch mock is used for concurrent
         # coroutines, it must set it explicitly.
-        local_patchings = [patching.copy() for patching in patchings]
         extra_args = []
         patchers_to_exit = []
         patch_dict_with_limited_scope = []
 
         exc_info = tuple()
         try:
-            for patching in local_patchings:
+            for patching in patchings:
                 arg = patching.__enter__()
                 if patching.scope == LIMITED:
                     patchers_to_exit.append(patching)
@@ -977,7 +976,7 @@ def _decorate_coroutine_callable(func, new_patching):
 
             args += tuple(extra_args)
             gen = func(*args, **kwargs)
-            return _PatchedGenerator(gen, local_patchings,
+            return _PatchedGenerator(gen, patchings,
                                      asyncio.iscoroutinefunction(func))
         except BaseException:
             if patching not in patchers_to_exit and _is_started(patching):
