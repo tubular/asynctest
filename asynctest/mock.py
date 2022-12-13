@@ -30,6 +30,8 @@ try:
 except AttributeError:
     _is_coroutine = True
 
+_NAME_PATTERN = None
+
 
 class _AsyncIterator:
     """
