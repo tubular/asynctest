@@ -12,7 +12,6 @@ work to a real selector.
 """
 
 import asyncio
-import collections
 try:
     import selectors
 except ImportError:
@@ -218,10 +217,6 @@ class TestSelector(selectors._BaseSelectorImpl):
         super().__init__()
         self._selector = selector
 
-        if selector is not None:
-            self._fd_to_key = collections.ChainMap(self._fd_to_key,
-                                                   selector.get_map())
-
     def _fileobj_lookup(self, fileobj):
         if isfilemock(fileobj):
             return fd(fileobj)
@@ -245,6 +240,9 @@ class TestSelector(selectors._BaseSelectorImpl):
         else:
             key = self._selector.register(fileobj, events, data)
 
+            if key:
+                self._fd_to_key[key.fd] = key
+
         return key
 
     def unregister(self, fileobj):
@@ -257,6 +255,9 @@ class TestSelector(selectors._BaseSelectorImpl):
             key = super().unregister(fileobj)
         else:
             key = self._selector.unregister(fileobj)
+
+            if key and key.fd in self._fd_to_key:
+                del self._fd_to_key[key.fd]
 
         return key
 
@@ -271,7 +272,16 @@ class TestSelector(selectors._BaseSelectorImpl):
         if isfilemock(fileobj) or self._selector is None:
             key = super().modify(fileobj, events, data)
         else:
+            # del the key first because modify() fails if events is incorrect
+            fd = self._fileobj_lookup(fileobj)
+
+            if fd in self._fd_to_key:
+                del self._fd_to_key[fd]
+
             key = self._selector.modify(fileobj, events, data)
+
+            if key:
+                self._fd_to_key[key.fd] = key
 
         return key
 
